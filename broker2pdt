@@ -56,7 +56,6 @@ class TransactionDetails(DataClassBase):
 	amount: float = 0.0
 	value: float = 0.0
 	currency: str = ""
-	total_value: float = 0.0
 
 @dataclass()
 class DividendDetails(DataClassBase):
@@ -174,19 +173,20 @@ tr.pay_date_str = {
 tr.exchange = "Frankfurt Exchange"
 tr.transaction_time = "14:00"
 tr.dividend_time = "14:00"
-tr.booking_time = "13:00"
 
-
+# function that display extra info (when the argument --info is provided)
 def print_info(s):
 	if _info_on:
-		print(f"   {s}", flush=True)
+		print(f"{s}", flush=True)
 
+# convert a string to a float while removing all ',' chars and convert it to a positive float
 def str2float(s, positive=False):
 	s = s.replace(",", "")
 	if positive:
 		return float(s.replace("-", ""))
 	else:
 		return float(s)
+
 
 def rename_broker_file(file_name, date_str, file_type):
 	# try to create the processed folder
@@ -218,12 +218,12 @@ def add_broker_expense(broker, dt, tm, description, value, currency):
 	e.value = value
 	e.currency = currency
 
-	print_info(e)
+	#print_info(e)
 	if e not in pdt_workbook_expenses:
-		print(f"   storing EXPENSE for {e.broker} ({e.currency} {e.value})")
+		print_info(f"   storing EXPENSE for {e.broker} ({e.currency} {e.value})")
 		pdf_expenses.append(e)
 	else:
-		print_info("   EXPENCE was already in PDT workbook")
+		print_info("   EXPENSE was already in PDT workbook")
 
 def add_broker_booking(broker, dt, tm, action, value, currency):
 	#print("adding broker booking")
@@ -235,15 +235,15 @@ def add_broker_booking(broker, dt, tm, action, value, currency):
 	b.value = value
 	b.currency = currency
 
-	print_info(b)
+	#print_info(b)
 	if b not in pdt_workbook_bookings:
-		print(f"   storing BOOKING to {b.broker} ({b.currency} {b.value})")
+		print_info(f"   storing BOOKING to {b.broker} ({b.currency} {b.value})")
 		pdf_bookings.append(b)
 	else:
-		print("   BOOKING was already in PDT workbook")
+		print_info("   BOOKING was already in PDT workbook")
 
 def read_broker_transactions(text, transaction_id):
-	print("found a transaction of Trade Republic")
+	print("   this is a TRANSACTION file of Trade Republic")
 
 	t = TransactionDetails()
 	previous_line = ""
@@ -272,7 +272,7 @@ def read_broker_transactions(text, transaction_id):
 				if tr.expense_end_str[tr.lang] in text[line_num + l]:
 					break
 				else:
-					print_info(f"{tr.expense_end_str[tr.lang]} is not in {text[line_num + l]}")
+					#print_info(f"{tr.expense_end_str[tr.lang]} is not in {text[line_num + l]}")
 					expense_lines = text[line_num + l].rsplit(" ", 2)
 					description = f"{tr.name} - {expense_lines[0]}"
 					expense_amount = str2float(expense_lines[1], True)
@@ -301,16 +301,13 @@ def read_broker_transactions(text, transaction_id):
 	t.amount = str2float(transaction_str.split(" ")[0])
 	t.value = str2float(transaction_str.split(" ")[2])
 	t.currency = transaction_str.split(" ")[3]
-	t.total_value = str2float(transaction_str.split(" ")[4])
-
-	#rename_broker_file(pdf_file, date_str, "Transaction")
 
 	#print_info(t)
 	if t not in pdt_workbook_transactions:
-		print(f"   storing TRANSACTION of {t.name} ({t.currency} {t.value})")
+		print_info(f"   storing TRANSACTION of {t.name} ({t.currency} {t.value})")
 		pdf_transactions.append(t)
 	else:
-		print("   TRANSACTION was already in PDT workbook")
+		print_info("   TRANSACTION was already in PDT workbook")
 		# transaction was already in PDT workbook we do not need to store the booking connected to it
 		booking_amount = 0.0
 
@@ -321,18 +318,22 @@ def read_broker_transactions(text, transaction_id):
 		add_broker_booking(tr.name, date_str, booking_time_str, 
 			std_booking_action, booking_amount, transaction_str.split(" ")[3])
 
+	return date_str
+
+
 def read_broker_dividend(text):
-	print_info("found a dividend statement of Trade Republic")
+	print_info("   this is a DIVIDEND statement file of Trade Republic")
 
 	d = DividendDetails()
 	previous_line = ""
+	print(text)
 
 	for line_num in range(len(text)):
 		#print_info(text[line_num])
 		if previous_line == tr.dividend_id[tr.lang]:
 			# get some dividend specifics
 			share_str = text[line_num]
-			isin_str = text[line_num + 1].split(" ")[1]
+			isin_str = text[line_num + 1].split(" ")[0]
 		if previous_line == tr.dividend_booking_id[tr.lang]:
 			# get the date and amount after taxes of the dividend
 			day, month, year = text[line_num].split(" ")[1].split(".")
@@ -354,10 +355,12 @@ def read_broker_dividend(text):
 
 	#print_info(d)
 	if d not in pdt_workbook_dividends:
-		print(f"   storing DIVIDEND of {d.name} ({d.currency} {d.amount})")
+		print_info(f"   storing DIVIDEND of {d.name} ({d.currency} {d.amount})")
 		pdf_dividends.append(d)
 	else:
-		print("   dividend was already in PDT workbook")
+		print_info("   DIVIDEND was already in PDT workbook")
+
+	return date_str
 
 def read_broker_tr_file(pdf_file):
 	# open the pdf file
@@ -381,21 +384,24 @@ def read_broker_tr_file(pdf_file):
 				# check if this is a "normal" Trade Republic transaction
 				if tr.transaction_str[tr.lang] in text:		
 					try:
-						transaction = read_broker_transactions(text, tr.transaction_str[tr.lang])
+						date_str = read_broker_transactions(text, tr.transaction_str[tr.lang])
+						rename_broker_file(pdf_file, date_str, "Transaction")
 						return True
 					except Exception as e:
 						traceback.print_exc()
 				# check if this is a recurring Trade Republic transaction
 				elif tr.savings_plan_str[tr.lang] in text:
 					try:
-						transaction = read_broker_transactions(text, tr.savings_plan_str[tr.lang])
+						date_str = read_broker_transactions(text, tr.savings_plan_str[tr.lang])
+						rename_broker_file(pdf_file, date_str, "Transaction")
 						return True
 					except Exception as e:
 						traceback.print_exc()
 				# check if this is a Trade Republic dividend statement
 				elif tr.dividend_str[tr.lang] in text:
 					try:
-						read_broker_dividend(text)
+						date_str = read_broker_dividend(text)
+						rename_broker_file(pdf_file, date_str, "Dividend")
 						return True
 					except Exception as e:
 						traceback.print_exc()
@@ -428,7 +434,7 @@ def import_from_pdt(folder_name, file_name):
 		print(f"{file_path} does not seem to exist")
 		return
 
-	print(f"importing {file_path}")
+	#print(f"importing {file_path}")
 	wb = load_workbook(file_path)
 	transactions_sheet = wb["Transactions"]
 	import_worksheet(transactions_sheet, TransactionDetails)
@@ -472,7 +478,7 @@ def export_to_pdt(folder_name, file_name):
 	if os.path.exists(file_path):
 		creation_time = os.path.getmtime(file_path)
 		creation_datetime = datetime.fromtimestamp(creation_time).strftime('%Y%m%dT%H%M%S')
-		new_file_path = os.path.join(_folder, f'{file_name}-{creation_datetime}.xlxs')
+		new_file_path = os.path.join(_folder, f'{file_name}-{creation_datetime}.xlsx')
 		try:
 			os.rename(file_path, new_file_path)
 		except:
@@ -486,23 +492,27 @@ def export_to_pdt(folder_name, file_name):
 	# remove standard sheet
 	wb.remove(wb.active)
 
-	# export transactions, dividends, bookings and expenses
+	# combine the loaded and new transactions, dividends, bookings and expenses
+	# sort each list of transactions, dividends, bookings and expenses
+	# export all transactions, dividends, bookings and expenses
 	all_transactions = pdf_transactions + pdt_workbook_transactions
-	#all_transactions.sort(key=lambda t: (t.date, t.broker))
+	all_transactions.sort(key=lambda t: (t.date, t.broker, t.name))
 	export_worksheet(wb, TransactionDetails, all_transactions)
 	all_dividends = pdf_dividends + pdt_workbook_dividends
-	#all_dividents.sort(key=lambda d: (d.broker, d.date))
+	all_dividends.sort(key=lambda d: (d.date, d.broker, d.name))
 	export_worksheet(wb, DividendDetails, all_dividends)
 	all_bookings = pdf_bookings + pdt_workbook_bookings
-	#all_bookings.sort(key=lambda b: (b.broker, b.date))
+	all_bookings.sort(key=lambda b: (b.date, b.broker))
 	export_worksheet(wb, BookingDetails, all_bookings)
 	all_expenses = pdf_expenses + pdt_workbook_expenses
-	#all_expenses.sort(key=lambda e: (e.broker, e.date))
+	all_expenses.sort(key=lambda e: (e.date, e.broker))
 	export_worksheet(wb, ExpenseDetails, all_expenses)
 
-	# and save data to file
+	# and save workbook data to file
 	wb.save(file_path)
 
+
+# main script flow
 
 # check Python version
 # asdict function only returns right order from version 3.8
@@ -518,15 +528,12 @@ parser.add_argument('--info', action='store_true', help='show extra info during 
 parser.add_argument('folder', nargs=1, help='folder to run this script in')
 args = parser.parse_args()
 
-# set some arguments
+# set globals based on given arguments
 _info_on = args.info
 _folder = args.folder[0]
 
+# check if 
 import_from_pdt(_folder, pdt_file_name)
-#for transaction in pdf_transactions:
-	#print_info(transaction)
-#for booking in pdf_bookings:
-	#print_info(booking)
 
 for file_name in os.listdir(_folder):
 	if file_name.endswith('.pdf'):
@@ -537,33 +544,15 @@ for file_name in os.listdir(_folder):
 			except Exception as e:
 				traceback.print_exc()
 				print("   something went wrong while reading Trade Republic PDF file")
+		else:
+			print("   this is an unknown PDF file")
 
-# create bookings for Trade Republic files
-#for transaction in pdf_transactions:
-#	if transaction.broker == tr.name:
-#		# first filter all bookings to Trade Republic with transaction date
-#		bookings = list(filter(lambda b: b.broker == tr.name and b.date == transaction.date, pdf_bookings))
-#		if len(bookings) > 0:
-#			#print_info(f"found broker {tr.name} in bookings with date {bookings[0].date}")
-#			bookings[0].value += transaction.total_value
-#		else:
-#			#print_info(f"did not find correct booking date {transaction.date} or broker {tr.name}")
-#			b = BookingDetails()
-#			b.broker = tr.name
-#			b.date = transaction.date
-#			b.time = tr.booking_time
-#			b.action = std_booking_action
-#			b.value = transaction.total_value
-#			b.currency = transaction.currency
-#			pdf_bookings.append(b)
-
+# show how many new transactions, divident, bookings and expenses were imported
 t_str = f"{len(pdf_transactions)} new transactions"
 d_str = f"{len(pdf_dividends)} new dividends"
 b_str = f"{len(pdf_bookings)} new bookings"
 e_str = f"{len(pdf_expenses)} new expenses"
 print(f"added {t_str}, {d_str}, {b_str} and {e_str} to export")
 
-for booking in pdf_bookings:
-	print_info(booking)
 
 export_to_pdt(_folder, pdt_file_name)
