@@ -326,7 +326,7 @@ def read_broker_dividend(text):
 
 	d = DividendDetails()
 	previous_line = ""
-	print(text)
+	#print(text)
 
 	for line_num in range(len(text)):
 		#print_info(text[line_num])
