@@ -1,0 +1,493 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import json
+from datetime import datetime, timedelta
+from openpyxl import Workbook, load_workbook
+import argparse
+import traceback
+from pypdf import PdfReader
+from dataclasses import dataclass, fields
+
+
+@dataclass()
+class DataClassBase:
+	"""
+	This base dataclass is solely to define the 2 functions below
+	"""
+	@classmethod
+	def get_field_names(cls):
+		return [f.name for f in fields(cls)]
+
+	def get_field_values(self):
+		return [getattr(self, f.name) for f in fields(self)]
+
+@dataclass()
+class TransactionDetails(DataClassBase):
+	"""
+	Datamodel for transactions as used in the PDT Google sheet
+	"""
+	broker: str = ""
+	name: str = ""
+	tp: str = ""
+	isin: str = ""
+	exchange: str = ""
+	date: str = ""
+	time: str = ""
+	action: str = ""
+	amount: float = 0.0
+	value: float = 0.0
+	currency: str = ""
+
+@dataclass()
+class DividendDetails(DataClassBase):
+	"""
+	Datamodel for dividends as used in the PDT Google sheet
+	"""
+	broker: str = ""
+	name: str = ""
+	tp: str = ""
+	isin: str = ""
+	exchange: str = ""
+	date: str = ""
+	time: str = ""
+	action: str = ""
+	amount: float = 0.0
+	currency: str = ""
+
+@dataclass()
+class BookingDetails(DataClassBase):
+	"""
+	Datamodel for bookings as used in the PDT Google sheet
+	"""
+	broker: str = ""
+	date: str = ""
+	time: str = ""
+	action: str = ""
+	value: float = 0.0
+	currency: str = ""
+
+@dataclass()
+class ExpenseDetails(DataClassBase):
+	"""
+	Datamodel for expenses as used in the PDT Google sheet
+	"""
+	broker: str = ""
+	date: str = ""
+	time: str = ""
+	description: str = ""
+	value: float = 0.0
+	currency: str = ""
+
+# these globals can be used anywher in the script
+
+# the four sheets from the PDT workbook
+# the have to variants
+# - the ones loaded from the PDT workbook
+# - the ones loaded from the PDFs
+pdt_workbook_transactions = []
+pdf_transactions = []
+pdt_workbook_dividends = []
+pdf_dividends = []
+pdt_workbook_bookings = []
+pdf_bookings = []
+pdt_workbook_expenses = []
+pdf_expenses = []
+
+# the main export and import workbook used by this script
+pdt_file_name = "PortfolioDividendTracker"
+
+# some statics
+std_broker_name = ""
+std_transaction_type = "Stock market"
+std_transaction_action = "Buy"
+std_dividend_type = "Stock market"
+std_dividend_action = "Cash"
+std_exchange_name = "Frankfurt Exchange"
+std_booking_action = "Deposit"
+std_processed_folder = "processed"
+
+# specific statics for Trade Republic
+tr_transaction_event = "trading_trade_executed"
+tr_transaction_subtitle = "Kauforder"
+tr_savings_plan_event = "trading_savingsplan_executed"
+tr_savings_plan_subtitle = "Sparplan ausgeführt"
+tr_dividend_event = "ssp_corporate_action_invoice_cash"
+tr_dividend_subtitle = "Bardividende" 
+
+# function that display extra info (when the argument --info is provided)
+def print_info(s):
+	if _info_on:
+		print(f"{s}", flush=True)
+
+def tr_str2float(s):
+	if s == "Kostenlos":
+		return 0.0
+	return float(s.replace(".", "").replace(",", ".").replace("€", "").rstrip())
+
+def add_tr_expense(broker: str, dt: str, tm: str, description: str, value: float, currency: str = "EUR"):
+	"""
+	Add a Trade Republic expense if it is not already present in the current PDT workbook.
+
+	Args:
+		broker:	Name of the broker (e.g., "Trade Republic")
+		dt: Date as a string in "YYYY-MM-DD" format
+		tm:	Time as a string in "HH:MM" format
+		description: Description of the expense (e.g., "Gebühr", "Steuer")
+		value: Expense value (positive number)
+		currency: Currency code (default is "EUR")
+	"""
+
+	#print_info("adding broker expense")
+	expense = ExpenseDetails(
+		broker=broker,
+		date=dt,
+		time=tm,
+		description=description,
+		value=value,
+		currency=currency
+	)
+
+	# Deduplication and storage
+	if expense not in pdt_workbook_expenses:
+		print(f"   storing    EXPENSE  at {dt} for {broker} of ({currency} {value})")
+		pdf_expenses.append(expense)
+	else:
+		print_info("   EXPENSE was already in PDT workbook")
+
+
+def add_tr_booking(broker: str, dt: str, tm: str, action: str, value: float, currency: str = "EUR"):
+	"""
+	Add a Trade Republic cash booking if it is not already present in the current PDT workbook.
+
+	Args:
+		broker: Name of the broker
+		dt: Date as "YYYY-MM-DD"
+		tm: Time as "HH:MM"
+		action: Action label (e.g., "Dividend", "Deposit")
+		value: Booking amount (positive or negative)
+		currency: Currency code (default is "EUR")
+	"""
+
+	#print("adding broker booking")
+	booking = BookingDetails(
+		broker=broker,
+		date=dt,
+		time=tm,
+		action=action,
+		value=value,
+		currency=currency,
+	)
+
+	# Deduplication and storage
+	if booking not in pdt_workbook_bookings:
+		print(f"   storing   BOOKING   at {dt} to {broker} of {currency} {value}")
+		pdf_bookings.append(booking)
+	else:
+		print_info("   BOOKING was already in PDT workbook")
+
+
+def read_tr_dividend(event: dict, date_str: str, time_str: str):
+	"""
+    Parse a single Trade Republic dividend event into a DividendDetails object.
+
+    Args:
+        event: Raw event dictionary from the Trade Republic timeline.
+        date_str: Date string "YYYY-MM-DD" extracted from the event timestamp.
+        time_str: Time string "HH:MM" extracted from the event timestamp.
+    """
+	print_info("   this is a DIVIDEND of Trade Republic")
+
+	dividend = DividendDetails(
+		broker=std_broker_name,
+		tp=std_dividend_type,
+		isin=event.get("icon", "").split("/")[1] if "icon" in event else "",
+		exchange=std_exchange_name,
+		date=date_str,
+		time=time_str,
+		action=std_dividend_action,
+		currency="EUR",
+	)
+
+	# Parse sections for security name and amount
+	for section in event.get("details", {}).get("sections", []):
+		title = section.get("title")
+
+		# Security overview: get security (asset) name
+		if title == "Übersicht":
+			for item in section.get("data", []):
+				if item.get("title") == "Wertpapier":
+					dividend.name = item.get("detail", {}).get("text", "")
+
+		# Transaction section: get total gross amount
+		elif title == "Geschäft":
+			for item in section.get("data", []):
+				if item.get("title") == "Gesamt":
+					raw = item.get("detail", {}).get("text", "")
+					dividend.amount = tr_str2float(raw)
+
+	# Deduplication and storage
+	if dividend not in pdt_workbook_dividends:
+		print(f"   storing  DIVIDEND   at {date} of {isin} - {dividend.name} of {dividend.currency} {dividend.amount}")
+		pdf_dividends.append(dividend)
+	else:
+		print_info("   DIVIDEND was already in PDT workbook")
+
+
+def read_tr_transaction(event: dict, date_str: str, time_str: str):
+	"""
+    Parse a single Trade Republic trading event into a TransactionDetails object
+    and, if needed, create subordinate expense and booking lines.
+
+    Args:
+        event:  Raw event dictionary from the Trade Republic timeline.
+        date_str:   Event date in "YYYY-MM-DD" format.
+        time_str:   Event time in "HH:MM" format.
+	"""
+	print_info("   this is a TRANSACTION of Trade Republic")
+
+	tr = TransactionDetails(
+		broker=std_broker_name,
+		tp=std_transaction_type,
+		isin=event.get("icon", "").split("/")[1] if "icon" in event else "",
+		exchange=std_exchange_name,
+		date=date_str,
+		time=time_str,
+		action=std_transaction_action,
+		currency="EUR",
+	)
+
+	booking_amount: float = 0.0  # will be filled later if "Summe" is found below
+
+	# Parse nested sections for asset name, amount, price, taxes, fees, etc.
+	for section in event.get("details", {}).get("sections", []):
+		title = section.get("title")
+
+		if title == "Übersicht":  # asset & trade details
+			for item in section.get("data", []):
+				item_title = item.get("title", "")
+				detail = item.get("detail", {})
+
+				if item_title == "Asset":
+					tr.name = detail.get("text", "")
+
+				elif item_title == "Transaktion":
+					payload_sections = (detail.get("action", {}).get("payload", {}).get("sections", []))
+					for sub in payload_sections:
+						if sub.get("type") == "table":
+							for row in sub.get("data", []):
+								r_title = row.get("title", "")
+								r_text = row.get("detail", {}).get("text", "")
+								if r_title == "Aktien":
+									tr.amount = tr_str2float(r_text)
+								elif r_title == "Aktienkurs":
+									tr.value = tr_str2float(r_text)
+
+				elif item_title == "Steuer":
+					amount = tr_str2float(detail.get("text", ""))
+					print_info(f"   found a cost line Steuer of {amount}")
+					if amount > 0:
+						description = f"Financial Transaction Tax for {tr.name}"
+						add_tr_expense(tr.broker, date_str, time_str, description, amount, tr.currency)
+
+				elif item_title == "Gebühr":
+					amount = tr_str2float(detail.get("text", ""))
+					print_info(f"   found a cost line Gebühr of {amount}")
+					if amount > 0:
+						description = f"External cost surcharge for {tr.name}"
+						add_tr_expense(tr.broker, date_str, time_str, description, amount, tr.currency)
+
+				elif item_title == "Summe":
+					booking_amount = tr_str2float(detail.get("text", ""))
+					print_info(f"   found a booking of {booking_amount}")
+
+	# Deduplication and storage
+	if tr in pdt_workbook_transactions:
+		print_info("   TRANSACTION was already in PDT workbook")
+		return
+
+	print(f"   storing TRANSACTION at {tr.date} of {tr.isin} - {tr.name} for {tr.amount} of {tr.currency} {tr.value}")
+	pdf_transactions.append(tr)
+
+	# Handle linked cash booking (cash flow booked 1 h prior)
+	if booking_amount > 0:
+		booking_time = datetime.strptime(time_str, "%H:%M") - timedelta(hours=1)
+		if booking_time < datetime.strptime("01:00", "%H:%M"):
+			booking_time_str = "00:00"
+		else:
+			booking_time_str = booking_time.strftime("%H:%M")
+
+		add_tr_booking(tr.broker, date_str, booking_time_str, std_booking_action, booking_amount, tr.currency)
+
+
+def read_tr_event(e):
+
+	event_type = e["eventType"]
+	event_subtitle = e["subtitle"]
+	dt = datetime.strptime(e["timestamp"], "%Y-%m-%dT%H:%M:%S.%f%z")
+	date_str = dt.strftime("%Y-%m-%d")
+	time_str = dt.strftime("%H:%M")
+	print(f"at {date_str} found eventtype={event_type} event_subtitle={event_subtitle}")
+
+	if event_type == tr_transaction_event and event_subtitle == tr_transaction_subtitle:
+		read_tr_transaction(e, date_str, time_str)
+	elif event_type == tr_savings_plan_event and event_subtitle == tr_savings_plan_subtitle:
+		read_tr_transaction(e, date_str, time_str)
+	elif event_type == tr_dividend_event and event_subtitle == tr_dividend_subtitle:
+		print("DDDDVID")
+		read_tr_dividend(e, date_str, time_str)
+
+def import_worksheet(ws, dataclass_type):
+	rows = list(ws.iter_rows(values_only=True))
+	header = rows[0]
+	data_rows = rows[1:]
+
+	for row in data_rows:
+		data_dict = dict(zip(header, row))
+		#print_info(f"found dict {data_dict}")
+		obj = dataclass_type(**data_dict)
+		if dataclass_type is TransactionDetails:
+			pdt_workbook_transactions.append(obj)
+		elif dataclass_type is DividendDetails:
+			pdt_workbook_dividends.append(obj)
+		elif dataclass_type is BookingDetails:
+			pdt_workbook_bookings.append(obj)
+		elif dataclass_type is ExpenseDetails:
+			pdt_workbook_expenses.append(obj)
+
+def import_from_pdt(folder_name, file_name):
+	file_path = os.path.join(folder_name, f"{file_name}.xlsx")
+	if not os.path.exists(file_path):
+		print(f"{file_path} does not seem to exist")
+		return
+
+	#print(f"importing {file_path}")
+	wb = load_workbook(file_path)
+	transactions_sheet = wb["Transactions"]
+	import_worksheet(transactions_sheet, TransactionDetails)
+	dividends_sheet = wb["Dividends"]
+	import_worksheet(dividends_sheet, DividendDetails)
+	bookings_sheet = wb["Bookings"]
+	import_worksheet(bookings_sheet, BookingDetails)
+	expenses_sheet = wb["Expenses"]
+	import_worksheet(expenses_sheet, ExpenseDetails)
+
+	t_str = f"{len(pdt_workbook_transactions)} transactions"
+	d_str = f"{len(pdt_workbook_dividends)} dividends"
+	b_str = f"{len(pdt_workbook_bookings)} bookings"
+	e_str = f"{len(pdt_workbook_expenses)} expenses"
+	print(f"imported {t_str}, {d_str}, {b_str} and {e_str}")
+
+def export_worksheet(wb, dataclass_type, iterator):
+	if dataclass_type is TransactionDetails:
+		ws = wb.create_sheet(title="Transactions")
+	elif dataclass_type is DividendDetails:
+		ws = wb.create_sheet(title="Dividends")
+	elif dataclass_type is BookingDetails:
+		ws = wb.create_sheet(title="Bookings")
+	elif dataclass_type is ExpenseDetails:
+		ws = wb.create_sheet(title="Expenses")
+
+	# write the column names
+	column_names = dataclass_type.get_field_names()
+	ws.append(column_names)
+
+	# write the data
+	for item in iterator:
+	    row = item.get_field_values()
+	    ws.append(row)
+
+def export_to_pdt(folder_name, file_name):
+
+	file_path = os.path.join(folder_name, f"{file_name}.xlsx")
+
+	# if the pdt file already exist then rename it
+	if os.path.exists(file_path):
+		creation_time = os.path.getmtime(file_path)
+		creation_datetime = datetime.fromtimestamp(creation_time).strftime('%Y%m%dT%H%M%S')
+		new_file_path = os.path.join(_folder, f'{file_name}-{creation_datetime}.xlsx')
+		try:
+			os.rename(file_path, new_file_path)
+		except:
+			print(f"FATAL: unable to rename file {file_path}")
+			exit()
+		print(f"saving current pdt file as backup at {new_file_path}")
+
+	print(f"exporting {file_path}")
+	# create new excel workbook
+	wb = Workbook()
+	# remove standard sheet
+	wb.remove(wb.active)
+
+	# combine the loaded and new transactions, dividends, bookings and expenses
+	# sort each list of transactions, dividends, bookings and expenses
+	# export all transactions, dividends, bookings and expenses
+	all_transactions = pdf_transactions + pdt_workbook_transactions
+	all_transactions.sort(key=lambda t: (t.date, t.broker, t.name))
+	export_worksheet(wb, TransactionDetails, all_transactions)
+	all_dividends = pdf_dividends + pdt_workbook_dividends
+	all_dividends.sort(key=lambda d: (d.date, d.broker, d.name))
+	export_worksheet(wb, DividendDetails, all_dividends)
+	all_bookings = pdf_bookings + pdt_workbook_bookings
+	all_bookings.sort(key=lambda b: (b.date, b.broker))
+	export_worksheet(wb, BookingDetails, all_bookings)
+	all_expenses = pdf_expenses + pdt_workbook_expenses
+	all_expenses.sort(key=lambda e: (e.date, e.broker))
+	export_worksheet(wb, ExpenseDetails, all_expenses)
+
+	# and save workbook data to file
+	wb.save(file_path)
+
+
+# main script flow
+if __name__ == '__main__':
+
+	# check Python version
+	# asdict function only returns right order from version 3.8
+	# Controleer minimale versie (bijv. 3.8)
+	v = sys.version_info
+	if v < (3, 8):
+	    print(f"This script requires python v3.8 and above. You are using v{v.major}.{v.minor}")
+	    exit()
+
+	# parse arguments
+	parser = argparse.ArgumentParser(description='Get TradeRepublic transactions from the last X days and store them in a file')
+	parser.add_argument('--info', action='store_true', help='show extra info during process')
+	parser.add_argument('phone', nargs=1, help='TradeRepublic phone number (international format)')
+	parser.add_argument('pin', nargs=1, help='TradeRepublic four digit pin')
+	parser.add_argument('days', nargs=1, help='number of last days to include in the file (1 to max 100)')
+	parser.add_argument('folder', nargs=1, help='working folder')
+	args = parser.parse_args()
+
+	# set globals based on given arguments
+	_info_on = args.info
+	_tr_phone = args.phone[0]
+	_tr_pin = args.pin[0]
+	_tr_days = int(args.days[0])
+	_folder = args.folder[0]
+
+	# check if days is within limits
+	if _tr_days < 1 or _tr_days > 100:
+		print(f"number of last days should be above 0 and max 100")
+		exit()
+
+	# import events from existing pdt workbook if it exists
+	#import_from_pdt(_folder, pdt_file_name)
+
+	with open("tr_events.json", "r", encoding="utf-8") as f:
+		events = json.load(f)
+
+	for e in events:
+		#print("found event")
+		read_tr_event(e)
+
+	# show how many new transactions, divident, bookings and expenses were imported
+	t_str = f"{len(pdf_transactions)} new transactions"
+	d_str = f"{len(pdf_dividends)} new dividends"
+	b_str = f"{len(pdf_bookings)} new bookings"
+	e_str = f"{len(pdf_expenses)} new expenses"
+	print(f"added {t_str}, {d_str}, {b_str} and {e_str} to export")
+
+	# save all events to pdt workbook
+	#export_to_pdt(_folder, pdt_file_name)
