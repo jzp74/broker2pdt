@@ -9,8 +9,6 @@ This script can import broker events Trade Republic and export them to an xlsx f
 ## Why I created this script
 I am a very happy user of Portfolio Dividend Tracker. Unfortunately, there's no officially available automatic export from Trade Republic to PDT. This is because Trade Republic still doesn’t offer a decent export function. At the moment, the only option is to manually download each transaction and dividend statement as a PDF. Painful. Since I use the auto-invest feature in Trade Republic — buying 11 fractional shares twice a month — I quickly realized that manually entering 22 transactions every month wasn’t going to happen. I'm way too lazy for that. So I wrote a script.
 
----
-
 ## How to use it
 _Basic command line knowledge assumed._
 
@@ -48,7 +46,7 @@ Next time you run the script:
 
 ## Notes
 Written in Python, using two external libraries:
-- 
+- pytrpp
 - openpyxl
 
 Install them with:
