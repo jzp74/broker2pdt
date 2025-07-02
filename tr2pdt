@@ -3,12 +3,18 @@
 import os
 import sys
 import json
-from datetime import datetime, timedelta
-from openpyxl import Workbook, load_workbook
+from datetime import datetime, timedelta, timezone
 import argparse
 import traceback
-from pypdf import PdfReader
+import logging
 from dataclasses import dataclass, fields
+
+from pypdf import PdfReader
+from openpyxl import Workbook, load_workbook
+from pytrpp.main import PyTrPP
+from pytrpp.trdl import Timeline
+
+get_logger = logging.getLogger
 
 
 @dataclass()
@@ -87,19 +93,19 @@ class ExpenseDetails(DataClassBase):
 # - the ones loaded from the PDT workbook
 # - the ones loaded from the PDFs
 pdt_workbook_transactions = []
-pdf_transactions = []
+tr_transactions = []
 pdt_workbook_dividends = []
-pdf_dividends = []
+tr_dividends = []
 pdt_workbook_bookings = []
-pdf_bookings = []
+tr_bookings = []
 pdt_workbook_expenses = []
-pdf_expenses = []
+tr_expenses = []
 
 # the main export and import workbook used by this script
 pdt_file_name = "PortfolioDividendTracker"
 
 # some statics
-std_broker_name = ""
+std_broker_name = "Trade Republic"
 std_transaction_type = "Stock market"
 std_transaction_action = "Buy"
 std_dividend_type = "Stock market"
@@ -152,7 +158,7 @@ def add_tr_expense(broker: str, dt: str, tm: str, description: str, value: float
 	# Deduplication and storage
 	if expense not in pdt_workbook_expenses:
 		print(f"   storing    EXPENSE  at {dt} for {broker} of ({currency} {value})")
-		pdf_expenses.append(expense)
+		tr_expenses.append(expense)
 	else:
 		print_info("   EXPENSE was already in PDT workbook")
 
@@ -183,7 +189,7 @@ def add_tr_booking(broker: str, dt: str, tm: str, action: str, value: float, cur
 	# Deduplication and storage
 	if booking not in pdt_workbook_bookings:
 		print(f"   storing   BOOKING   at {dt} to {broker} of {currency} {value}")
-		pdf_bookings.append(booking)
+		tr_bookings.append(booking)
 	else:
 		print_info("   BOOKING was already in PDT workbook")
 
@@ -229,8 +235,8 @@ def read_tr_dividend(event: dict, date_str: str, time_str: str):
 
 	# Deduplication and storage
 	if dividend not in pdt_workbook_dividends:
-		print(f"   storing  DIVIDEND   at {date} of {isin} - {dividend.name} of {dividend.currency} {dividend.amount}")
-		pdf_dividends.append(dividend)
+		print(f"   storing  DIVIDEND   at {date_str} of {dividend.isin} - {dividend.name} of {dividend.currency} {dividend.amount}")
+		tr_dividends.append(dividend)
 	else:
 		print_info("   DIVIDEND was already in PDT workbook")
 
@@ -308,7 +314,7 @@ def read_tr_transaction(event: dict, date_str: str, time_str: str):
 		return
 
 	print(f"   storing TRANSACTION at {tr.date} of {tr.isin} - {tr.name} for {tr.amount} of {tr.currency} {tr.value}")
-	pdf_transactions.append(tr)
+	tr_transactions.append(tr)
 
 	# Handle linked cash booking (cash flow booked 1 h prior)
 	if booking_amount > 0:
@@ -328,14 +334,13 @@ def read_tr_event(e):
 	dt = datetime.strptime(e["timestamp"], "%Y-%m-%dT%H:%M:%S.%f%z")
 	date_str = dt.strftime("%Y-%m-%d")
 	time_str = dt.strftime("%H:%M")
-	print(f"at {date_str} found eventtype={event_type} event_subtitle={event_subtitle}")
+	print_info(f"at {date_str} found eventtype={event_type} event_subtitle={event_subtitle}")
 
 	if event_type == tr_transaction_event and event_subtitle == tr_transaction_subtitle:
 		read_tr_transaction(e, date_str, time_str)
 	elif event_type == tr_savings_plan_event and event_subtitle == tr_savings_plan_subtitle:
 		read_tr_transaction(e, date_str, time_str)
 	elif event_type == tr_dividend_event and event_subtitle == tr_dividend_subtitle:
-		print("DDDDVID")
 		read_tr_dividend(e, date_str, time_str)
 
 def import_worksheet(ws, dataclass_type):
@@ -423,21 +428,37 @@ def export_to_pdt(folder_name, file_name):
 	# combine the loaded and new transactions, dividends, bookings and expenses
 	# sort each list of transactions, dividends, bookings and expenses
 	# export all transactions, dividends, bookings and expenses
-	all_transactions = pdf_transactions + pdt_workbook_transactions
+	all_transactions = tr_transactions + pdt_workbook_transactions
 	all_transactions.sort(key=lambda t: (t.date, t.broker, t.name))
 	export_worksheet(wb, TransactionDetails, all_transactions)
-	all_dividends = pdf_dividends + pdt_workbook_dividends
+	all_dividends = tr_dividends + pdt_workbook_dividends
 	all_dividends.sort(key=lambda d: (d.date, d.broker, d.name))
 	export_worksheet(wb, DividendDetails, all_dividends)
-	all_bookings = pdf_bookings + pdt_workbook_bookings
+	all_bookings = tr_bookings + pdt_workbook_bookings
 	all_bookings.sort(key=lambda b: (b.date, b.broker))
 	export_worksheet(wb, BookingDetails, all_bookings)
-	all_expenses = pdf_expenses + pdt_workbook_expenses
+	all_expenses = tr_expenses + pdt_workbook_expenses
 	all_expenses.sort(key=lambda e: (e.date, e.broker))
 	export_worksheet(wb, ExpenseDetails, all_expenses)
 
 	# and save workbook data to file
 	wb.save(file_path)
+
+
+class MyTrPP(PyTrPP):
+
+	def process(self):
+		self.login()
+
+		timeline = Timeline(
+			tr=self.tr,
+			since_timestamp=self.since,
+			max_workers=self.workers,
+			logger=self.logger,
+		)
+		events = timeline.get_events()
+
+		return events
 
 
 # main script flow
@@ -454,18 +475,27 @@ if __name__ == '__main__':
 	# parse arguments
 	parser = argparse.ArgumentParser(description='Get TradeRepublic transactions from the last X days and store them in a file')
 	parser.add_argument('--info', action='store_true', help='show extra info during process')
-	parser.add_argument('phone', nargs=1, help='TradeRepublic phone number (international format)')
-	parser.add_argument('pin', nargs=1, help='TradeRepublic four digit pin')
-	parser.add_argument('days', nargs=1, help='number of last days to include in the file (1 to max 100)')
-	parser.add_argument('folder', nargs=1, help='working folder')
+	parser.add_argument('phone_no', nargs=1, help='TradeRepublic phone number (international format)')
+	parser.add_argument('pin', nargs=1, help='TradeRepublic pin')
+	parser.add_argument('-d', '--days', help='number of last days to include in the file (1 to max 100)')
+	parser.add_argument('-f', '--folder', help='working folder (other than the current folder')
 	args = parser.parse_args()
 
-	# set globals based on given arguments
+	# check given arguments and set globals based on given arguments
+	_tr_days = 30
+	if not args.pin:
+		print("no last days given, assuming last 30 days")
+
 	_info_on = args.info
-	_tr_phone = args.phone[0]
+	if not args.folder:		
+		_folder = "."
+	else:
+		_folder = args.folder_info_on = args.info
+	_tr_phone = args.phone_no[0]
 	_tr_pin = args.pin[0]
-	_tr_days = int(args.days[0])
-	_folder = args.folder[0]
+	if args.days != 30:
+		_tr_days = int(args.days)
+	print(f"found phone={_tr_phone}, pin={_tr_pin}, days={_tr_days} and folder={_folder}")
 
 	# check if days is within limits
 	if _tr_days < 1 or _tr_days > 100:
@@ -473,21 +503,50 @@ if __name__ == '__main__':
 		exit()
 
 	# import events from existing pdt workbook if it exists
-	#import_from_pdt(_folder, pdt_file_name)
+	import_from_pdt(_folder, pdt_file_name)
 
-	with open("tr_events.json", "r", encoding="utf-8") as f:
-		events = json.load(f)
+	#with open("tr_events.json", "r", encoding="utf-8") as f:
+	#	events = json.load(f)
+
+	since_ts = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=_tr_days))
+	logging.disable(logging.CRITICAL)
+
+	print(f"getting events from Trade Republic...")
+
+	try:
+		events = MyTrPP(
+			phone_no=_tr_phone,
+			pin=_tr_pin,
+			since=since_ts,
+		).process()
+	except:
+		print(f"Unable to login or connect to Trade Republic")
+		exit()
+
+	# saving events just to be sure...
+	dt_str = datetime.now().strftime('%Y%m%dT%H%M%S')
+	with open(f"tr_events-{dt_str}.json", "w", encoding="utf-8") as f:
+		json.dump(events, f, ensure_ascii=False, indent=4)
+
+	print(f"processing {len(events)} events from Trade Republic...")
 
 	for e in events:
 		#print("found event")
 		read_tr_event(e)
 
-	# show how many new transactions, divident, bookings and expenses were imported
-	t_str = f"{len(pdf_transactions)} new transactions"
-	d_str = f"{len(pdf_dividends)} new dividends"
-	b_str = f"{len(pdf_bookings)} new bookings"
-	e_str = f"{len(pdf_expenses)} new expenses"
-	print(f"added {t_str}, {d_str}, {b_str} and {e_str} to export")
+	if (len(tr_transactions) > 0
+		or len(tr_dividends) > 0
+		or len(tr_bookings) > 0
+		or len(tr_expenses) > 0):
+	
+		# show how many new transactions, divident, bookings and expenses were imported
+		t_str = f"{len(tr_transactions)} new transactions"
+		d_str = f"{len(tr_dividends)} new dividends"
+		b_str = f"{len(tr_bookings)} new bookings"
+		e_str = f"{len(tr_expenses)} new expenses"
+		print(f"added {t_str}, {d_str}, {b_str} and {e_str} to workbook")
 
 	# save all events to pdt workbook
-	#export_to_pdt(_folder, pdt_file_name)
+		export_to_pdt(_folder, pdt_file_name)
+	else:
+		print(f"no new events found to add to workbook")

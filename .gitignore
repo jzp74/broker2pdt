@@ -3,3 +3,6 @@
 
 # ignore all xlsx files
 *.xlsx
+
+# ignore all json files
+*.json
