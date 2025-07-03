@@ -9,7 +9,6 @@ import traceback
 import logging
 from dataclasses import dataclass, fields
 
-from pypdf import PdfReader
 from openpyxl import Workbook, load_workbook
 from pytrpp.main import PyTrPP
 from pytrpp.trdl import Timeline
