@@ -46,12 +46,12 @@ Next time you run the script:
 
 ## Notes
 Written in Python, using two external libraries:
-- pytrpp
+- pytr (you need at least 0.4.7)
 - openpyxl
 
 Install them with:
 ~~~bash
-pip install pytrpp openpyxl
+pip install pytr openpyxl
 ~~~
 
 ## Disclaimers
